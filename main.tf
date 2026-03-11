@@ -191,3 +191,76 @@ module "rds_videos" {
   db_username        = var.rds_db_username
   engine_version     = var.rds_engine_version
 }
+
+###############################################################################
+# ECR — Processor
+###############################################################################
+
+resource "aws_ecr_repository" "processor" {
+  name         = "${var.project_name}-processor"
+  force_delete = true
+
+  image_scanning_configuration {
+    scan_on_push = false
+  }
+
+  tags = {
+    Name = "${var.project_name}-processor"
+  }
+}
+
+###############################################################################
+# S3 — Video Storage
+###############################################################################
+
+resource "aws_s3_bucket" "videos" {
+  bucket        = "${var.project_name}-videos-storage"
+  force_destroy = true
+
+  tags = {
+    Name = "${var.project_name}-videos-storage"
+  }
+}
+
+###############################################################################
+# SNS — Video Uploaded Topic
+###############################################################################
+
+resource "aws_sns_topic" "video_uploaded" {
+  name = "${var.project_name}-video-uploaded"
+}
+
+###############################################################################
+# SQS — Video Processor Queue
+###############################################################################
+
+resource "aws_sqs_queue" "video_processor" {
+  name                       = "${var.project_name}-video-processor"
+  visibility_timeout_seconds = 300
+  message_retention_seconds  = 86400
+}
+
+resource "aws_sns_topic_subscription" "video_processor" {
+  topic_arn = aws_sns_topic.video_uploaded.arn
+  protocol  = "sqs"
+  endpoint  = aws_sqs_queue.video_processor.arn
+}
+
+resource "aws_sqs_queue_policy" "video_processor" {
+  queue_url = aws_sqs_queue.video_processor.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "sns.amazonaws.com" }
+      Action    = "sqs:SendMessage"
+      Resource  = aws_sqs_queue.video_processor.arn
+      Condition = {
+        ArnEquals = {
+          "aws:SourceArn" = aws_sns_topic.video_uploaded.arn
+        }
+      }
+    }]
+  })
+}

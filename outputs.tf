@@ -90,3 +90,27 @@ output "jwt_secret_arn" {
   description = "Secrets Manager secret ARN for JWT signing key"
   value       = aws_secretsmanager_secret.jwt_secret.arn
 }
+
+###############################################################################
+# Messaging & Storage
+###############################################################################
+
+output "s3_videos_bucket" {
+  description = "S3 bucket name for video storage"
+  value       = aws_s3_bucket.videos.bucket
+}
+
+output "sns_video_uploaded_arn" {
+  description = "SNS topic ARN for video-uploaded events"
+  value       = aws_sns_topic.video_uploaded.arn
+}
+
+output "sqs_video_processor_url" {
+  description = "SQS queue URL for the video processor"
+  value       = aws_sqs_queue.video_processor.url
+}
+
+output "ecr_processor_url" {
+  description = "ECR repository URL for the processor service"
+  value       = aws_ecr_repository.processor.repository_url
+}
