@@ -1,9 +1,8 @@
-name: Terraform
+name: Terraform PR Validation
 
 on:
-  push:
+  pull_request:
     branches: [main]
-  workflow_dispatch:
 
 env:
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -13,8 +12,8 @@ env:
   TF_VAR_region: us-east-1
 
 jobs:
-  bootstrap:
-    name: Bootstrap (S3 bucket)
+  validate-bootstrap:
+    name: Validate Bootstrap
     runs-on: ubuntu-latest
 
     steps:
@@ -26,16 +25,21 @@ jobs:
         with:
           terraform_version: 1.5.0
 
-      - name: Bootstrap Init & Apply
+      - name: Bootstrap Init
         working-directory: bootstrap
-        run: |
-          terraform init
-          terraform import aws_s3_bucket.tfstate hack-fiap233-tfstate 2>/dev/null || true
-          terraform apply -auto-approve
+        run: terraform init
 
-  terraform:
-    name: Terraform
-    needs: bootstrap
+      - name: Bootstrap Validate
+        working-directory: bootstrap
+        run: terraform validate
+
+      - name: Bootstrap Plan
+        working-directory: bootstrap
+        run: terraform plan
+
+  validate-terraform:
+    name: Validate Terraform
+    needs: validate-bootstrap
     runs-on: ubuntu-latest
 
     steps:
@@ -48,13 +52,7 @@ jobs:
           terraform_version: 1.5.0
 
       - name: Terraform Init
-        run: terraform init
+        run: terraform init -backend=false
 
       - name: Terraform Validate
         run: terraform validate
-
-      - name: Terraform Plan
-        run: terraform plan -out=tfplan
-
-      - name: Terraform Apply
-        run: terraform apply -auto-approve
