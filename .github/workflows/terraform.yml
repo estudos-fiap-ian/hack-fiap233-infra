@@ -32,6 +32,7 @@ jobs:
         working-directory: bootstrap
         run: |
           terraform init
+          terraform import aws_s3_bucket.tfstate hack-fiap233-tfstate 2>/dev/null || true
           terraform apply -auto-approve
 
   terraform:
