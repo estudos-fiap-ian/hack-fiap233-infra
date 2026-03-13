@@ -1,6 +1,6 @@
 # hack-fiap233-infra
 
-Infraestrutura Terraform para provisionar um cluster EKS na AWS com arquitetura de microsserviços, usando API Gateway como ponto de entrada público...
+Infraestrutura Terraform para provisionar um cluster EKS na AWS com arquitetura de microsserviços orientada a eventos, usando API Gateway como ponto de entrada público e um pipeline assíncrono de processamento de vídeos via SNS/SQS.
 
 ## Arquitetura
 
@@ -10,6 +10,8 @@ Cliente
    ▼
 API Gateway (HTTP API — público)
    │
+   ├─── Lambda Authorizer (JWT) ─── Secrets Manager (jwt-secret)
+   │
    ▼
 VPC Link
    │
@@ -17,6 +19,22 @@ VPC Link
 NLB interno (private subnets)
    ├── porta 8081 → NodePort 30081 → PODs do serviço de Usuários → RDS Postgres (usersdb)
    └── porta 8082 → NodePort 30082 → PODs do serviço de Vídeos  → RDS Postgres (videosdb)
+                                              │
+                                              │ upload de vídeo
+                                              ▼
+                                        S3 (videos-storage)
+                                              │
+                                              │ publica evento
+                                              ▼
+                                        SNS (video-uploaded)
+                                              │
+                                              │ fan-out
+                                              ▼
+                                        SQS (video-processor)
+                                              │
+                                              │ consome
+                                              ▼
+                                     PODs do Processor Service
 ```
 
 ## Pré-requisitos
@@ -25,27 +43,56 @@ NLB interno (private subnets)
 - Docker instalado e rodando
 - AWS CLI configurado com credenciais da AWS Academy
 - `kubectl` instalado
+- `jq` instalado (para inspecionar secrets)
 
 ## Estrutura dos Repositórios
 
 ```
 hackathon/
-├── hack-fiap233-infra/        # Este repositório (infraestrutura)
-│   ├── bootstrap/             # S3 bucket para remote state
-│   ├── modules/               # Módulos Terraform (vpc, eks, nlb, api_gateway, rds)
-│   ├── main.tf                # Composição dos módulos + ECR repos
+├── hack-fiap233-infra/          # Este repositório (infraestrutura)
+│   ├── bootstrap/               # S3 bucket para remote state
+│   ├── modules/
+│   │   ├── api_gateway/         # HTTP API + VPC Link + rotas
+│   │   ├── eks/                 # Cluster + managed node group
+│   │   ├── nlb/                 # Network Load Balancer interno
+│   │   ├── rds/                 # RDS PostgreSQL (reutilizável)
+│   │   ├── vpc/                 # VPC, subnets, security groups
+│   │   └── authorizer/          # Lambda Authorizer JWT
+│   ├── main.tf                  # Composição dos módulos + ECR + S3 + SNS + SQS
 │   ├── variables.tf
 │   ├── outputs.tf
 │   └── terraform.tfvars
-├── hack-fiap233-users/        # Microsserviço de usuários (Go)
+├── hack-fiap233-users/          # Microsserviço de usuários (Go)
 │   ├── main.go
 │   ├── Dockerfile
-│   └── k8s/                   # Manifests Kubernetes
-└── hack-fiap233-videos/       # Microsserviço de vídeos (Go)
+│   └── k8s/
+├── hack-fiap233-videos/         # Microsserviço de vídeos (Go)
+│   ├── main.go
+│   ├── Dockerfile
+│   └── k8s/
+└── hack-fiap233-processor/      # Serviço de processamento de vídeos (Go)
     ├── main.go
     ├── Dockerfile
-    └── k8s/                   # Manifests Kubernetes
+    └── k8s/
 ```
+
+---
+
+## Recursos Provisionados
+
+| Recurso | Nome / ID | Descrição |
+|---|---|---|
+| VPC | `hack-fiap233-vpc` | VPC com subnets públicas e privadas |
+| EKS | `hack-fiap233-eks` | Cluster Kubernetes (v1.29) |
+| NLB | interno | Load balancer para roteamento ao EKS |
+| API Gateway | HTTP API | Ponto de entrada público com Lambda Authorizer |
+| Lambda Authorizer | `hack-fiap233-authorizer` | Validação JWT em cada request |
+| RDS | `usersdb` / `videosdb` | PostgreSQL 16.6 para cada serviço |
+| ECR | `users` / `videos` / `processor` | Repositórios de imagens Docker |
+| S3 | `hack-fiap233-videos-storage` | Armazenamento de arquivos de vídeo |
+| SNS | `hack-fiap233-video-uploaded` | Tópico de eventos de upload de vídeo |
+| SQS | `hack-fiap233-video-processor` | Fila consumida pelo processor service |
+| Secrets Manager | `jwt-secret`, `users/db-credentials`, `videos/db-credentials` | Segredos gerenciados |
 
 ---
 
@@ -73,12 +120,17 @@ terraform apply -auto-approve
 Ao final, anote os outputs:
 
 ```
-api_gateway_url    = "https://xxxxx.execute-api.us-east-1.amazonaws.com/"
-eks_cluster_name   = "hack-fiap233-eks"
-ecr_users_url      = "432686365376.dkr.ecr.us-east-1.amazonaws.com/hack-fiap233-users"
-ecr_videos_url     = "432686365376.dkr.ecr.us-east-1.amazonaws.com/hack-fiap233-videos"
-rds_users_endpoint = "..."
-rds_videos_endpoint = "..."
+api_gateway_url          = "https://xxxxx.execute-api.us-east-1.amazonaws.com/"
+eks_cluster_name         = "hack-fiap233-eks"
+ecr_users_url            = "432686365376.dkr.ecr.us-east-1.amazonaws.com/hack-fiap233-users"
+ecr_videos_url           = "432686365376.dkr.ecr.us-east-1.amazonaws.com/hack-fiap233-videos"
+ecr_processor_url        = "432686365376.dkr.ecr.us-east-1.amazonaws.com/hack-fiap233-processor"
+rds_users_endpoint       = "..."
+rds_videos_endpoint      = "..."
+s3_videos_bucket         = "hack-fiap233-videos-storage"
+sns_video_uploaded_arn   = "arn:aws:sns:us-east-1:432686365376:hack-fiap233-video-uploaded"
+sqs_video_processor_url  = "https://sqs.us-east-1.amazonaws.com/432686365376/hack-fiap233-video-processor"
+jwt_secret_name          = "hack-fiap233/jwt-secret"
 ```
 
 ### Passo 3 — Configurar kubectl
@@ -109,25 +161,27 @@ docker push 432686365376.dkr.ecr.us-east-1.amazonaws.com/hack-fiap233-users:late
 # Videos
 docker build -t 432686365376.dkr.ecr.us-east-1.amazonaws.com/hack-fiap233-videos:latest ../hack-fiap233-videos
 docker push 432686365376.dkr.ecr.us-east-1.amazonaws.com/hack-fiap233-videos:latest
+
+# Processor
+docker build -t 432686365376.dkr.ecr.us-east-1.amazonaws.com/hack-fiap233-processor:latest ../hack-fiap233-processor
+docker push 432686365376.dkr.ecr.us-east-1.amazonaws.com/hack-fiap233-processor:latest
 ```
 
-> **Nota:** se você estiver em Mac com Apple Silicon (M1/M2/M3), faça build multi-platform:
+> **Mac com Apple Silicon (M1/M2/M3):** faça build multi-platform para compatibilidade com os nodes x86:
 > ```bash
-> docker build --platform linux/amd64 -t 432686365376.dkr.ecr.us-east-1.amazonaws.com/hack-fiap233-users:latest ../hack-fiap233-users
+> docker build --platform linux/amd64 -t <ECR_URL>:latest <diretório>
 > ```
 
 ### Passo 6 — Atualizar as imagens nos manifests K8s
 
-Substitua os placeholders nos arquivos de deployment:
-
 ```bash
-# Pega a URL do ECR do output do Terraform
 ECR_USERS=$(terraform output -raw ecr_users_url)
 ECR_VIDEOS=$(terraform output -raw ecr_videos_url)
+ECR_PROCESSOR=$(terraform output -raw ecr_processor_url)
 
-# Atualiza os deployments
-sed -i '' "s|ECR_USERS_URL|${ECR_USERS}|" ../hack-fiap233-users/k8s/deployment.yaml
-sed -i '' "s|ECR_VIDEOS_URL|${ECR_VIDEOS}|" ../hack-fiap233-videos/k8s/deployment.yaml
+sed -i '' "s|ECR_USERS_URL|${ECR_USERS}|"         ../hack-fiap233-users/k8s/deployment.yaml
+sed -i '' "s|ECR_VIDEOS_URL|${ECR_VIDEOS}|"       ../hack-fiap233-videos/k8s/deployment.yaml
+sed -i '' "s|ECR_PROCESSOR_URL|${ECR_PROCESSOR}|" ../hack-fiap233-processor/k8s/deployment.yaml
 ```
 
 ### Passo 7 — Deploy no EKS
@@ -135,6 +189,7 @@ sed -i '' "s|ECR_VIDEOS_URL|${ECR_VIDEOS}|" ../hack-fiap233-videos/k8s/deploymen
 ```bash
 kubectl apply -f ../hack-fiap233-users/k8s/
 kubectl apply -f ../hack-fiap233-videos/k8s/
+kubectl apply -f ../hack-fiap233-processor/k8s/
 ```
 
 Acompanhe o rollout:
@@ -142,42 +197,46 @@ Acompanhe o rollout:
 ```bash
 kubectl rollout status deployment/users-deployment
 kubectl rollout status deployment/videos-deployment
+kubectl rollout status deployment/processor-deployment
 ```
 
 ### Passo 8 — Testar
 
 ```bash
-# Health checks
-curl https://$(terraform output -raw api_gateway_url)users/health
-curl https://$(terraform output -raw api_gateway_url)videos/health
+API=$(terraform output -raw api_gateway_url)
 
-# Endpoints
-curl https://$(terraform output -raw api_gateway_url)users/hello
-curl https://$(terraform output -raw api_gateway_url)videos/hello
-```
+# Health checks (sem autenticação)
+curl ${API}users/health
+curl ${API}videos/health
 
-Respostas esperadas:
-
-```json
-{"message":"Hello from Users Service","method":"GET","path":"/users/hello"}
-{"message":"Hello from Videos Service","method":"GET","path":"/videos/hello"}
+# Endpoints autenticados (Bearer JWT)
+TOKEN="<seu-jwt>"
+curl -H "Authorization: Bearer ${TOKEN}" ${API}users/hello
+curl -H "Authorization: Bearer ${TOKEN}" ${API}videos/hello
 ```
 
 ---
 
-## Credenciais dos Bancos de Dados
+## Credenciais e Secrets
 
-As credenciais são geradas automaticamente e armazenadas no **AWS Secrets Manager**:
+Todos os segredos são gerados automaticamente e armazenados no **AWS Secrets Manager**:
 
 ```bash
-# Users DB
+# JWT Secret (usado pelo Lambda Authorizer e pelo serviço de Usuários)
+aws secretsmanager get-secret-value \
+  --secret-id hack-fiap233/jwt-secret \
+  --region us-east-1 \
+  --query SecretString \
+  --output text
+
+# Credenciais do banco de Usuários
 aws secretsmanager get-secret-value \
   --secret-id hack-fiap233/users/db-credentials \
   --region us-east-1 \
   --query SecretString \
   --output text | jq .
 
-# Videos DB
+# Credenciais do banco de Vídeos
 aws secretsmanager get-secret-value \
   --secret-id hack-fiap233/videos/db-credentials \
   --region us-east-1 \
@@ -189,7 +248,7 @@ aws secretsmanager get-secret-value \
 
 ## CI/CD com GitHub Actions
 
-Todos os passos podem ser automatizados. Configure estas secrets no repositório GitHub em **Settings > Secrets and variables > Actions**:
+Configure estas secrets no repositório GitHub em **Settings > Secrets and variables > Actions**:
 
 | Secret | Descrição |
 |---|---|
@@ -223,27 +282,15 @@ jobs:
   terraform:
     name: Terraform Apply
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.5.0
-
-      - name: Terraform Init
-        run: terraform init
-
-      - name: Terraform Validate
-        run: terraform validate
-
-      - name: Terraform Plan
-        run: terraform plan -out=tfplan
-
-      - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
+      - run: terraform init
+      - run: terraform validate
+      - run: terraform plan -out=tfplan
+      - run: terraform apply -auto-approve tfplan
 ```
 
 ### Workflow — Deploy dos Microsserviços
@@ -263,6 +310,7 @@ on:
         options:
           - users
           - videos
+          - processor
           - all
 
 env:
@@ -276,29 +324,33 @@ jobs:
   deploy:
     name: Deploy ${{ github.event.inputs.service }}
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure kubectl
-        run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+      - uses: actions/checkout@v4
+      - run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
 
       - name: Deploy users
-        if: github.event.inputs.service == 'users' || github.event.inputs.service == 'all'
+        if: inputs.service == 'users' || inputs.service == 'all'
         run: kubectl apply -f k8s/users/
 
       - name: Deploy videos
-        if: github.event.inputs.service == 'videos' || github.event.inputs.service == 'all'
+        if: inputs.service == 'videos' || inputs.service == 'all'
         run: kubectl apply -f k8s/videos/
 
+      - name: Deploy processor
+        if: inputs.service == 'processor' || inputs.service == 'all'
+        run: kubectl apply -f k8s/processor/
+
       - name: Verify rollout users
-        if: github.event.inputs.service == 'users' || github.event.inputs.service == 'all'
+        if: inputs.service == 'users' || inputs.service == 'all'
         run: kubectl rollout status deployment/users-deployment --timeout=120s
 
       - name: Verify rollout videos
-        if: github.event.inputs.service == 'videos' || github.event.inputs.service == 'all'
+        if: inputs.service == 'videos' || inputs.service == 'all'
         run: kubectl rollout status deployment/videos-deployment --timeout=120s
+
+      - name: Verify rollout processor
+        if: inputs.service == 'processor' || inputs.service == 'all'
+        run: kubectl rollout status deployment/processor-deployment --timeout=120s
 ```
 
 ---
@@ -306,54 +358,77 @@ jobs:
 ## Comandos Úteis
 
 ```bash
-# Ver pods
+# Ver pods e services
 kubectl get pods
-
-# Ver services
 kubectl get svc
 
-# Logs de um pod
+# Logs de um serviço
 kubectl logs -f deployment/users-deployment
+kubectl logs -f deployment/videos-deployment
+kubectl logs -f deployment/processor-deployment
 
 # Escalar replicas
 kubectl scale deployment/users-deployment --replicas=3
 
+# Inspecionar fila SQS
+aws sqs get-queue-attributes \
+  --queue-url $(terraform output -raw sqs_video_processor_url) \
+  --attribute-names ApproximateNumberOfMessages \
+  --region us-east-1
+
+# Publicar manualmente no SNS (para testar o pipeline)
+aws sns publish \
+  --topic-arn $(terraform output -raw sns_video_uploaded_arn) \
+  --message '{"bucket":"hack-fiap233-videos-storage","key":"test/video.mp4"}' \
+  --region us-east-1
+
 # Credenciais DB
-aws secretsmanager get-secret-value --secret-id hack-fiap233/users/db-credentials --query SecretString --output text | jq .
+aws secretsmanager get-secret-value \
+  --secret-id hack-fiap233/users/db-credentials \
+  --query SecretString --output text | jq .
 ```
+
+---
 
 ## Variáveis Configuráveis
 
 | Variável | Padrão | Descrição |
 |---|---|---|
-| `region` | `us-east-1` | Regiao AWS |
-| `project_name` | `hack-fiap233` | Nome do projeto |
-| `kubernetes_version` | `1.29` | Versao do Kubernetes |
-| `node_instance_types` | `["t3.medium"]` | Tipo de instancia dos nodes |
+| `region` | `us-east-1` | Região AWS |
+| `project_name` | `hack-fiap233` | Nome do projeto (prefixo de todos os recursos) |
+| `kubernetes_version` | `1.29` | Versão do Kubernetes |
+| `node_instance_types` | `["t3.medium"]` | Tipo de instância dos nodes EKS |
 | `node_desired_size` | `2` | Quantidade desejada de nodes |
-| `node_min_size` | `1` | Minimo de nodes |
-| `node_max_size` | `3` | Maximo de nodes |
-| `nlb_port_users` | `8081` | Porta do NLB para usuarios |
-| `nlb_port_videos` | `8082` | Porta do NLB para videos |
-| `node_port_users` | `30081` | NodePort para usuarios |
-| `node_port_videos` | `30082` | NodePort para videos |
-| `rds_instance_class` | `db.t3.micro` | Classe da instancia RDS |
-| `rds_engine_version` | `16.6` | Versao do PostgreSQL |
+| `node_min_size` | `1` | Mínimo de nodes |
+| `node_max_size` | `3` | Máximo de nodes |
+| `nlb_port_users` | `8081` | Porta do NLB para o serviço de usuários |
+| `nlb_port_videos` | `8082` | Porta do NLB para o serviço de vídeos |
+| `node_port_users` | `30081` | NodePort Kubernetes para usuários |
+| `node_port_videos` | `30082` | NodePort Kubernetes para vídeos |
+| `rds_instance_class` | `db.t3.micro` | Classe de instância RDS |
+| `rds_allocated_storage` | `20` | Armazenamento alocado para o RDS (GB) |
+| `rds_db_username` | `dbadmin` | Usuário master do RDS |
+| `rds_engine_version` | `16.6` | Versão do PostgreSQL |
+
+---
 
 ## AWS Academy
 
-Este projeto usa o role `LabRole` existente na conta AWS Academy. Nenhum IAM Role, Policy ou attachment e criado pelo Terraform. O `AWS_SESSION_TOKEN` expira a cada sessao do lab — atualize-o antes de executar os comandos.
+Este projeto usa o role `LabRole` existente na conta AWS Academy. Nenhum IAM Role, Policy ou attachment é criado pelo Terraform. O `AWS_SESSION_TOKEN` expira a cada sessão do lab — atualize-o antes de executar qualquer comando.
+
+---
 
 ## Destruir a Infraestrutura
 
 ```bash
-# Remover pods primeiro
+# 1. Remover todos os pods
 kubectl delete -f ../hack-fiap233-users/k8s/
 kubectl delete -f ../hack-fiap233-videos/k8s/
+kubectl delete -f ../hack-fiap233-processor/k8s/
 
-# Destruir a infraestrutura
+# 2. Destruir a infraestrutura
 terraform destroy
 
-# Destruir o bucket de state (opcional)
+# 3. Destruir o bucket de state (opcional — ação irreversível)
 cd bootstrap && terraform destroy
 ```
